@@ -75,9 +75,15 @@ def connect_google_drive_interactive(cfg: BackupConfig) -> tuple[bool, str]:
 class BackupManagerGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Minecraft -> Google Drive Auto-Backup")
+        self.root.title("mcBackup — Minecraft -> Google Drive Auto-Backup")
         self.root.geometry("940x680")
         self.root.minsize(820, 580)
+        ico_path = APP_DIR / "assets" / "logo.ico"
+        if ico_path.is_file():
+            try:
+                self.root.iconbitmap(str(ico_path))
+            except tk.TclError:
+                pass
 
         self.cfg = load_config()
         self.worlds: list[DiscoveredWorld] = []

@@ -1,4 +1,8 @@
-# Minecraft -> Google Drive Auto-Backup
+<p align="center">
+  <img src="assets/logo.png" alt="mcBackup Logo" width="220">
+</p>
+
+# mcBackup — Minecraft -> Google Drive Auto-Backup
 
 Automatically creates timestamped `.zip` backups of your chosen Minecraft world(s) and uploads them to Google Drive via `rclone` after every **Save & Quit**, **Quit Game**, or **Windows Shutdown/Logoff**.
 
