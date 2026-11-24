@@ -47,7 +47,7 @@ def connect_google_drive_interactive(cfg: BackupConfig) -> tuple[bool, str]:
     # `rclone config create <remote> drive` opens the local browser OAuth flow
     # automatically without needing a Google Cloud project.
     try:
-                res = subprocess.run(
+        res = subprocess.run(
             [
                 rclone,
                 "config",
@@ -79,9 +79,16 @@ class BackupManagerGUI:
         self.root.geometry("940x680")
         self.root.minsize(820, 580)
         ico_path = APP_DIR / "assets" / "logo.ico"
-        if ico_path.is_file():
+        png_path = APP_DIR / "assets" / "logo.png"
+        if sys.platform == "win32" and ico_path.is_file():
             try:
                 self.root.iconbitmap(str(ico_path))
+            except tk.TclError:
+                pass
+        elif png_path.is_file():
+            try:
+                self._icon_img = tk.PhotoImage(file=str(png_path))
+                self.root.iconphoto(True, self._icon_img)
             except tk.TclError:
                 pass
 
@@ -176,10 +183,10 @@ class BackupManagerGUI:
         ttk.Entry(row1, textvariable=self.folder_var, width=22).pack(side="left", padx=(4, 14))
         ttk.Label(row1, text="Keep Latest N Backups:").pack(side="left")
         ttk.Entry(row1, textvariable=self.keep_var, width=6).pack(side="left", padx=(4, 14))
-        ttk.Checkbutton(row1, text="Windows Notifications", variable=self.notify_var).pack(side="left", padx=8)
+        ttk.Checkbutton(row1, text="Desktop Notifications", variable=self.notify_var).pack(side="left", padx=8)
         ttk.Checkbutton(
             row1,
-            text="Start Watcher on Windows Login",
+            text="Start Watcher on Login",
             variable=self.startup_var,
             command=self.on_toggle_startup,
         ).pack(side="left", padx=8)
@@ -319,9 +326,14 @@ class BackupManagerGUI:
             return
         rclone = find_rclone(self.cfg.rclone_path)
         if not rclone:
+            hint = (
+                "Install it with: winget install Rclone.Rclone"
+                if sys.platform == "win32"
+                else "Install it with: brew install rclone (macOS) or https://rclone.org/install/ (Linux)"
+            )
             messagebox.showerror(
                 "rclone Not Found",
-                "rclone.exe was not found. Install it with: winget install Rclone.Rclone",
+                f"rclone was not found. {hint}",
             )
             return
 

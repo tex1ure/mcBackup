@@ -52,6 +52,51 @@ def _find_rclone() -> str | None:
     return None
 
 
+def _find_real_python() -> tuple[str, str] | None:
+    """Locate a real python.exe + pythonw.exe installation (ignoring Windows Store stub)."""
+    candidates: list[Path] = []
+    for cmd in ("python", "py"):
+        found = shutil.which(cmd)
+        if found:
+            candidates.append(Path(found))
+
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        for base in (
+            Path(local) / "Programs" / "Python",
+            Path(local) / "Python",
+        ):
+            if base.is_dir():
+                candidates.extend(sorted(base.glob("Python*/python.exe"), reverse=True))
+                candidates.extend(sorted(base.glob("pythoncore-*/python.exe"), reverse=True))
+
+    for prog_env in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(prog_env, "")
+        if base:
+            candidates.extend(sorted(Path(base).glob("Python*/python.exe"), reverse=True))
+
+    seen: set[str] = set()
+    for exe in candidates:
+        key = str(exe).lower()
+        if key in seen or not exe.is_file():
+            continue
+        seen.add(key)
+        try:
+            probe = subprocess.run(
+                [str(exe), "-c", "import tkinter; print('OK')"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            if probe.returncode == 0 and "OK" in probe.stdout:
+                pythonw = exe.with_name("pythonw.exe")
+                return str(exe), str(pythonw if pythonw.is_file() else exe)
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return None
+
+
 def _create_desktop_shortcut(install_dir: Path) -> None:
     bat = install_dir / "Start Backup Manager.bat"
     ico = install_dir / "assets" / "logo.ico"
@@ -139,10 +184,36 @@ class InstallerApp:
                     creationflags=CREATE_NO_WINDOW,
                 )
 
+            py_pair = _find_real_python()
+            if not py_pair:
+                self.set_status("Installing Python 3 via winget (first-time setup)...")
+                subprocess.run(
+                    [
+                        "winget",
+                        "install",
+                        "--id",
+                        "Python.Python.3.12",
+                        "--accept-package-agreements",
+                        "--accept-source-agreements",
+                        "--silent",
+                    ],
+                    capture_output=True,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                py_pair = _find_real_python()
+
+            if not py_pair:
+                raise RuntimeError(
+                    "Python 3 with Tkinter could not be found or installed automatically. "
+                    "Please install Python from https://www.python.org/downloads/ and re-run setup."
+                )
+
+            python_exe, pythonw_exe = py_pair
+
             self.set_status("Creating Desktop shortcut & startup task...")
             _create_desktop_shortcut(self.install_dir)
             subprocess.run(
-                ["python", str(self.install_dir / "app.py"), "--install-startup"],
+                [python_exe, str(self.install_dir / "app.py"), "--install-startup"],
                 cwd=str(self.install_dir),
                 capture_output=True,
                 creationflags=CREATE_NO_WINDOW,
@@ -150,9 +221,11 @@ class InstallerApp:
 
             self.set_status("Starting mcBackup...")
             subprocess.Popen(
-                ["cmd", "/c", "start", "", str(self.install_dir / "Start Backup Manager.bat")],
+                [pythonw_exe, str(self.install_dir / "app.py")],
                 cwd=str(self.install_dir),
-                creationflags=CREATE_NO_WINDOW,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
             )
             self.root.after(800, self.root.destroy)
         except Exception as exc:
