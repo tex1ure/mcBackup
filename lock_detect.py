@@ -1,71 +1,71 @@
-"""Windows file-lock detection and world change fingerprinting."""
+"""Cross-platform file-lock detection and world change fingerprinting."""
 
 from __future__ import annotations
 
-import ctypes
-from ctypes import wintypes
 import hashlib
 import os
+import sys
 from pathlib import Path
 
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
 
-GENERIC_READ = 0x80000000
-GENERIC_WRITE = 0x40000000
-OPEN_EXISTING = 3
-FILE_ATTRIBUTE_NORMAL = 0x80
-INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
-LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
-LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+    GENERIC_READ = 0x80000000
+    GENERIC_WRITE = 0x40000000
+    OPEN_EXISTING = 3
+    FILE_ATTRIBUTE_NORMAL = 0x80
+    INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
 
-ERROR_ACCESS_DENIED = 5
-ERROR_SHARING_VIOLATION = 32
-ERROR_LOCK_VIOLATION = 33
+    LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
+    LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
 
+    ERROR_ACCESS_DENIED = 5
+    ERROR_SHARING_VIOLATION = 32
+    ERROR_LOCK_VIOLATION = 33
 
-class OVERLAPPED(ctypes.Structure):
-    _fields_ = [
-        ("Internal", ctypes.c_void_p),
-        ("InternalHigh", ctypes.c_void_p),
-        ("Offset", wintypes.DWORD),
-        ("OffsetHigh", wintypes.DWORD),
-        ("hEvent", wintypes.HANDLE),
+    class OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_void_p),
+            ("InternalHigh", ctypes.c_void_p),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
     ]
-
-
-kernel32.CreateFileW.argtypes = [
-    wintypes.LPCWSTR,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    wintypes.LPVOID,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    wintypes.HANDLE,
-]
-kernel32.CreateFileW.restype = wintypes.HANDLE
-
-kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-kernel32.CloseHandle.restype = wintypes.BOOL
-
-kernel32.LockFileEx.argtypes = [
-    wintypes.HANDLE,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    ctypes.POINTER(OVERLAPPED),
-]
-kernel32.LockFileEx.restype = wintypes.BOOL
-
-kernel32.UnlockFileEx.argtypes = [
-    wintypes.HANDLE,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    ctypes.POINTER(OVERLAPPED),
-]
-kernel32.UnlockFileEx.restype = wintypes.BOOL
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.LockFileEx.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(OVERLAPPED),
+    ]
+    kernel32.LockFileEx.restype = wintypes.BOOL
+    kernel32.UnlockFileEx.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(OVERLAPPED),
+    ]
+    kernel32.UnlockFileEx.restype = wintypes.BOOL
+else:
+    import fcntl
 
 
 def is_world_locked(world_path: str | Path) -> bool:
@@ -74,10 +74,22 @@ def is_world_locked(world_path: str | Path) -> bool:
     if not lock_file.is_file():
         return False
 
+    if sys.platform != "win32":
+        try:
+            with open(lock_file, "r+b") as fh:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    return False
+                except BlockingIOError:
+                    return True
+        except OSError:
+            return False
+
     handle = kernel32.CreateFileW(
         str(lock_file),
         GENERIC_READ | GENERIC_WRITE,
-        0,  # exclusive share mode: fails if any process has the file open
+        0,
         None,
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL,

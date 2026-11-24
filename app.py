@@ -47,7 +47,7 @@ def connect_google_drive_interactive(cfg: BackupConfig) -> tuple[bool, str]:
     # `rclone config create <remote> drive` opens the local browser OAuth flow
     # automatically without needing a Google Cloud project.
     try:
-        res = subprocess.run(
+                res = subprocess.run(
             [
                 rclone,
                 "config",
@@ -60,7 +60,7 @@ def connect_google_drive_interactive(cfg: BackupConfig) -> tuple[bool, str]:
             capture_output=True,
             text=True,
             timeout=180,
-            creationflags=0x08000000,
+            **({"creationflags": 0x08000000} if sys.platform == "win32" else {}),
         )
         if res.returncode == 0:
             return check_rclone_status(cfg)
@@ -370,7 +370,12 @@ class BackupManagerGUI:
     def on_open_backups(self) -> None:
         bdir = self.cfg.resolved_backups_dir()
         bdir.mkdir(parents=True, exist_ok=True)
-        os.startfile(str(bdir))
+        if sys.platform == "win32":
+            os.startfile(str(bdir))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(bdir)])
+        else:
+            subprocess.Popen(["xdg-open", str(bdir)])
 
     def refresh_status(self) -> None:
         def check() -> None:

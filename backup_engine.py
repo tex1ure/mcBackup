@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
+import sys
 import time
 import zipfile
 from dataclasses import dataclass
@@ -24,6 +26,10 @@ from config import (
 from lock_detect import compute_world_fingerprint, is_world_locked
 
 CREATE_NO_WINDOW = 0x08000000
+
+
+def _popen_kwargs() -> dict:
+    return {"creationflags": CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
 def get_logger(name: str = "mc_backup") -> logging.Logger:
@@ -51,7 +57,23 @@ def safe_world_slug(world_path: str | Path) -> str:
 
 
 def send_windows_notification(title: str, message: str) -> None:
-    """Best-effort Windows toast notification without external packages."""
+    """Best-effort desktop notification on Windows, macOS, or Linux."""
+    if sys.platform == "darwin":
+        try:
+            script = f'display notification "{message.replace(chr(34), "")}" with title "{title.replace(chr(34), "")}"'
+            subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+        return
+
+    if sys.platform != "win32":
+        if shutil.which("notify-send"):
+            try:
+                subprocess.Popen(["notify-send", title, message], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                pass
+        return
+
     safe_title = title.replace("'", "''")
     safe_msg = message.replace("'", "''")
     ps_script = (
@@ -68,7 +90,7 @@ def send_windows_notification(title: str, message: str) -> None:
             ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=CREATE_NO_WINDOW,
+            **_popen_kwargs(),
         )
     except OSError:
         pass
@@ -87,7 +109,7 @@ def check_rclone_status(cfg: BackupConfig | None = None) -> tuple[bool, str]:
             capture_output=True,
             text=True,
             timeout=10,
-            creationflags=CREATE_NO_WINDOW,
+            **_popen_kwargs(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"rclone error: {exc}"
@@ -105,7 +127,7 @@ def check_rclone_status(cfg: BackupConfig | None = None) -> tuple[bool, str]:
             capture_output=True,
             text=True,
             timeout=15,
-            creationflags=CREATE_NO_WINDOW,
+            **_popen_kwargs(),
         )
         if probe.returncode == 0:
             return True, f"Connected ({cfg.rclone_remote}:)"
@@ -172,7 +194,7 @@ def _upload_zip_to_drive(
             capture_output=True,
             text=True,
             timeout=600,
-            creationflags=CREATE_NO_WINDOW,
+            **_popen_kwargs(),
         )
         if res.returncode == 0:
             logger.info("Uploaded to Google Drive: %s", remote_target)
@@ -224,7 +246,7 @@ def _prune_remote_backups(
             capture_output=True,
             text=True,
             timeout=60,
-            creationflags=CREATE_NO_WINDOW,
+            **_popen_kwargs(),
         )
         if res.returncode != 0:
             return
@@ -242,7 +264,7 @@ def _prune_remote_backups(
                 capture_output=True,
                 text=True,
                 timeout=60,
-                creationflags=CREATE_NO_WINDOW,
+                **_popen_kwargs(),
             )
             if del_res.returncode == 0:
                 logger.info("Pruned old Drive backup: %s/%s", world_slug, old_name)

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import ctypes
-from ctypes import wintypes
+import os
+import signal
+import sys
 import threading
 import time
 from pathlib import Path
@@ -15,16 +16,19 @@ from backup_engine import (
 )
 from config import CONFIG_PATH, load_config
 from lock_detect import is_world_locked
-from startup import MUTEX_NAME
+from startup import MUTEX_NAME, PID_FILE
 
-WM_QUERYENDSESSION = 0x0011
-WM_ENDSESSION = 0x0016
-WM_DESTROY = 0x0002
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
 
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-user32 = ctypes.WinDLL("user32", use_last_error=True)
+    WM_QUERYENDSESSION = 0x0011
+    WM_ENDSESSION = 0x0016
+    WM_DESTROY = 0x0002
 
-ERROR_ALREADY_EXISTS = 183
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    ERROR_ALREADY_EXISTS = 183
 
 
 class WorldWatcher:
@@ -50,8 +54,8 @@ class WorldWatcher:
             )
 
     def handle_shutdown_event(self) -> None:
-        """Called when Windows signals logoff/shutdown: create local backups immediately."""
-        self.logger.info("Windows shutdown/logoff signal received — checking worlds.")
+        """Called when OS signals logoff/shutdown: create local backups immediately."""
+        self.logger.info("OS shutdown/logoff signal received — checking worlds.")
         with self._lock:
             cfg = load_config()
             for raw in cfg.selected_worlds:
@@ -59,14 +63,13 @@ class WorldWatcher:
                 if not wp.is_dir():
                     continue
                 if not is_world_locked(wp):
-                    backup_world(wp, cfg, reason="windows_shutdown", skip_upload=True)
+                    backup_world(wp, cfg, reason="os_shutdown", skip_upload=True)
         self.stop_event.set()
 
     def run(self) -> None:
-        self.logger.info("Minecraft Google Drive Auto-Backup Watcher started.")
+        self.logger.info("mcBackup Auto-Backup Watcher started.")
         self._reload_config_if_changed()
 
-        # Upload any queued backups from an offline/interrupted session first
         try:
             flushed = flush_pending_uploads(self.cfg, self.logger)
             if flushed:
@@ -74,7 +77,6 @@ class WorldWatcher:
         except Exception:
             self.logger.exception("Error flushing pending uploads on startup")
 
-        # Initial startup check: back up if world changed while watcher was offline
         if self.cfg.backup_on_startup_if_changed:
             for raw in self.cfg.selected_worlds:
                 wp = Path(raw)
@@ -120,7 +122,6 @@ class WorldWatcher:
 
                 self._was_locked[raw] = locked_now
 
-            # Periodically retry pending uploads every 2 minutes if offline earlier
             now = time.monotonic()
             if now - last_flush_check >= 120.0:
                 last_flush_check = now
@@ -203,19 +204,40 @@ def _run_win32_shutdown_listener(watcher: WorldWatcher) -> None:
 
 
 def main() -> int:
-    mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)
-    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
-        if mutex:
-            kernel32.CloseHandle(mutex)
-        return 0
+    mutex = None
+    if sys.platform == "win32":
+        mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+            if mutex:
+                kernel32.CloseHandle(mutex)
+            return 0
+    else:
+        PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if PID_FILE.is_file():
+            try:
+                old_pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+                os.kill(old_pid, 0)
+                return 0
+            except (ValueError, OSError):
+                pass
+        PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
 
     watcher = WorldWatcher()
-    listener_thread = threading.Thread(
-        target=_run_win32_shutdown_listener,
-        args=(watcher,),
-        daemon=True,
-    )
-    listener_thread.start()
+
+    if sys.platform == "win32":
+        listener_thread = threading.Thread(
+            target=_run_win32_shutdown_listener,
+            args=(watcher,),
+            daemon=True,
+        )
+        listener_thread.start()
+    else:
+        def _on_posix_signal(_signum, _frame):
+            watcher.handle_shutdown_event()
+
+        signal.signal(signal.SIGTERM, _on_posix_signal)
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, _on_posix_signal)
 
     try:
         watcher.run()
@@ -224,6 +246,8 @@ def main() -> int:
     finally:
         if mutex:
             kernel32.CloseHandle(mutex)
+        elif sys.platform != "win32":
+            PID_FILE.unlink(missing_ok=True)
     return 0
 
 

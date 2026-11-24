@@ -200,66 +200,112 @@ def inspect_world(world_path: str | Path, source_label: str = "Custom") -> Disco
 
 
 def _candidate_saves_roots(extra_roots: Iterable[str] = ()) -> list[tuple[str, Path]]:
-    roots: list[tuple[str, Path]] = []
-    appdata = os.environ.get("APPDATA", "")
-    localappdata = os.environ.get("LOCALAPPDATA", "")
-    userprofile = os.environ.get("USERPROFILE", "")
+    import sys
 
-    if appdata:
-        roots.append(("Vanilla (.minecraft)", Path(appdata) / ".minecraft" / "saves"))
+    roots: list[tuple[str, Path]] = []
+    home = Path.home()
+
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "")
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        userprofile = os.environ.get("USERPROFILE", "")
+
+        if appdata:
+            roots.append(("Vanilla (.minecraft)", Path(appdata) / ".minecraft" / "saves"))
+            for launcher in ("PolyMC", "PrismLauncher", "MultiMC"):
+                inst_dir = Path(appdata) / launcher / "instances"
+                if inst_dir.is_dir():
+                    for inst in inst_dir.iterdir():
+                        if not inst.is_dir():
+                            continue
+                        for sub in (".minecraft", "minecraft"):
+                            s = inst / sub / "saves"
+                            if s.is_dir():
+                                roots.append((f"{launcher} ({inst.name})", s))
+
+            modrinth = Path(appdata) / "ModrinthApp" / "profiles"
+            if modrinth.is_dir():
+                for prof in modrinth.iterdir():
+                    s = prof / "saves"
+                    if s.is_dir():
+                        roots.append((f"Modrinth ({prof.name})", s))
+
+        if userprofile:
+            cf = Path(userprofile) / "curseforge" / "minecraft" / "Instances"
+            if cf.is_dir():
+                for inst in cf.iterdir():
+                    s = inst / "saves"
+                    if s.is_dir():
+                        roots.append((f"CurseForge ({inst.name})", s))
+
+        if localappdata:
+            bedrock = (
+                Path(localappdata)
+                / "Packages"
+                / "Microsoft.MinecraftUWP_8wekyb3d8bbwe"
+                / "LocalState"
+                / "games"
+                / "com.mojang"
+                / "minecraftWorlds"
+            )
+            if bedrock.is_dir():
+                roots.append(("Minecraft Bedrock", bedrock))
+
+        for drive in ("A:", "B:", "C:", "D:", "E:"):
+            for rel in ("minecraft/game/saves", "minecraft/saves", "Minecraft/saves", "PolyMC/instances"):
+                cand = Path(f"{drive}/{rel}")
+                if not cand.is_dir():
+                    continue
+                if cand.name == "instances":
+                    for inst in cand.iterdir():
+                        for sub in (".minecraft", "minecraft"):
+                            s = inst / sub / "saves"
+                            if s.is_dir():
+                                roots.append((f"PolyMC ({inst.name})", s))
+                else:
+                    roots.append((f"{drive} Minecraft", cand))
+
+    elif sys.platform == "darwin":
+        app_sup = home / "Library" / "Application Support"
+        roots.append(("Vanilla (minecraft)", app_sup / "minecraft" / "saves"))
         for launcher in ("PolyMC", "PrismLauncher", "MultiMC"):
-            inst_dir = Path(appdata) / launcher / "instances"
+            inst_dir = app_sup / launcher / "instances"
             if inst_dir.is_dir():
                 for inst in inst_dir.iterdir():
-                    if not inst.is_dir():
-                        continue
                     for sub in (".minecraft", "minecraft"):
                         s = inst / sub / "saves"
                         if s.is_dir():
                             roots.append((f"{launcher} ({inst.name})", s))
-
-        modrinth = Path(appdata) / "ModrinthApp" / "profiles"
+        modrinth = app_sup / "ModrinthApp" / "profiles"
         if modrinth.is_dir():
             for prof in modrinth.iterdir():
                 s = prof / "saves"
                 if s.is_dir():
                     roots.append((f"Modrinth ({prof.name})", s))
-
-    if userprofile:
-        cf = Path(userprofile) / "curseforge" / "minecraft" / "Instances"
+        cf = home / "Documents" / "curseforge" / "minecraft" / "Instances"
         if cf.is_dir():
             for inst in cf.iterdir():
                 s = inst / "saves"
                 if s.is_dir():
                     roots.append((f"CurseForge ({inst.name})", s))
 
-    if localappdata:
-        bedrock = (
-            Path(localappdata)
-            / "Packages"
-            / "Microsoft.MinecraftUWP_8wekyb3d8bbwe"
-            / "LocalState"
-            / "games"
-            / "com.mojang"
-            / "minecraftWorlds"
-        )
-        if bedrock.is_dir():
-            roots.append(("Minecraft Bedrock", bedrock))
-
-    # Check common secondary drive Minecraft locations (like A:\minecraft\game\saves)
-    for drive in ("A:", "B:", "C:", "D:", "E:"):
-        for rel in ("minecraft/game/saves", "minecraft/saves", "Minecraft/saves", "PolyMC/instances"):
-            cand = Path(f"{drive}/{rel}")
-            if not cand.is_dir():
-                continue
-            if cand.name == "instances":
-                for inst in cand.iterdir():
+    else:  # Linux
+        roots.append(("Vanilla (.minecraft)", home / ".minecraft" / "saves"))
+        share = home / ".local" / "share"
+        for launcher in ("PolyMC", "PrismLauncher", "multimc"):
+            inst_dir = share / launcher / "instances"
+            if inst_dir.is_dir():
+                for inst in inst_dir.iterdir():
                     for sub in (".minecraft", "minecraft"):
                         s = inst / sub / "saves"
                         if s.is_dir():
-                            roots.append((f"PolyMC ({inst.name})", s))
-            else:
-                roots.append((f"{drive} Minecraft", cand))
+                            roots.append((f"{launcher} ({inst.name})", s))
+        modrinth = home / ".config" / "ModrinthApp" / "profiles"
+        if modrinth.is_dir():
+            for prof in modrinth.iterdir():
+                s = prof / "saves"
+                if s.is_dir():
+                    roots.append((f"Modrinth ({prof.name})", s))
 
     for extra in extra_roots:
         ep = Path(extra)
