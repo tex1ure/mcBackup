@@ -1,29 +1,9 @@
-# Executables & installers
+__pycache__/
+*.py[cod]
 *.exe
-*.msi
-*.msix
-*.appx
-*.bat
-*.cmd
-*.com
-*.scr
-*.ps1
-*.vbs
-*.dll
-*.so
-*.dylib
-*.bin
-*.out
-*.elf
-*.dmg
-*.pkg
-*.deb
-*.rpm
-*.AppImage
-*.apk
-*.ipa
-
-# PyInstaller build artifacts
+mcBackup-Linux.sh
+mcBackup-macOS.command
+data/
 build/
 dist/
 *.spec
