@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import config as cfg_mod  # noqa: E402
-from backup_engine import backup_world  # noqa: E402
+from backup_engine import backup_world, restore_world_from_drive  # noqa: E402
 from config import BackupConfig, load_state  # noqa: E402
 from lock_detect import compute_world_fingerprint, is_world_locked  # noqa: E402
 from watcher import WorldWatcher  # noqa: E402
@@ -62,12 +62,17 @@ class TestMinecraftBackup(unittest.TestCase):
         cfg_mod.STATE_PATH = cfg_mod.DATA_DIR / "state.json"
         cfg_mod.LOGS_DIR = cfg_mod.DATA_DIR / "logs"
 
-        # Redirect backup_engine module references too
+        # Redirect backup_engine module references and disable real rclone in unit tests
         import backup_engine
 
         backup_engine.LOGS_DIR = cfg_mod.LOGS_DIR
+        self._orig_find_rclone = backup_engine.find_rclone
+        backup_engine.find_rclone = lambda _p="": None
 
     def tearDown(self) -> None:
+        import backup_engine
+
+        backup_engine.find_rclone = self._orig_find_rclone
         cfg_mod.DATA_DIR = self._orig_data
         cfg_mod.CONFIG_PATH = self._orig_cfg
         cfg_mod.STATE_PATH = self._orig_state
@@ -184,6 +189,79 @@ class TestMinecraftBackup(unittest.TestCase):
         watcher.stop_event.set()
         t.join(timeout=3)
         self.assertGreaterEqual(len(zips), 1)
+
+    def test_restore_world_creates_safety_snapshot_and_restores(self) -> None:
+        cfg = BackupConfig(
+            selected_worlds=[str(self.world_dir)],
+            backups_dir=str(self.tmp / "backups"),
+            notify_on_backup=False,
+        )
+        cfg_mod.save_config(cfg)
+
+        orig_bytes = b"originalchunkdata" * 50
+        (self.world_dir / "region" / "r.0.0.mca").write_bytes(orig_bytes)
+        backup_res = backup_world(self.world_dir, cfg, reason="pre_modify", skip_upload=True)
+        zip_name = Path(backup_res.zip_path).name
+
+        # Corrupt / modify world after backup
+        (self.world_dir / "region" / "r.0.0.mca").write_bytes(b"modifiedafterbackup")
+
+        restore_res = restore_world_from_drive("MyTestWorld", zip_name, self.world_dir, cfg)
+        self.assertTrue(restore_res.success, restore_res.message)
+        self.assertEqual((self.world_dir / "region" / "r.0.0.mca").read_bytes(), orig_bytes)
+        self.assertTrue(Path(restore_res.safety_zip_path).is_file())
+
+    def test_restore_refuses_when_world_locked(self) -> None:
+        cfg = BackupConfig(
+            selected_worlds=[str(self.world_dir)],
+            backups_dir=str(self.tmp / "backups"),
+            notify_on_backup=False,
+        )
+        cfg_mod.save_config(cfg)
+        backup_res = backup_world(self.world_dir, cfg, reason="seed", skip_upload=True)
+        zip_name = Path(backup_res.zip_path).name
+
+        lock_file = self.world_dir / "session.lock"
+        holder_code = (
+            "import msvcrt, sys, time; "
+            "f = open(sys.argv[1], 'r+b'); "
+            "msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1); "
+            "print('LOCKED', flush=True); "
+            "time.sleep(10)"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", holder_code, str(lock_file)],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.assertEqual(proc.stdout.readline().strip() if proc.stdout else "", "LOCKED")
+            res = restore_world_from_drive("MyTestWorld", zip_name, self.world_dir, cfg)
+            self.assertFalse(res.success)
+            self.assertIn("open in Minecraft", res.message)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_restore_rejects_invalid_archive_and_preserves_world(self) -> None:
+        import zipfile
+
+        cfg = BackupConfig(
+            selected_worlds=[str(self.world_dir)],
+            backups_dir=str(self.tmp / "backups"),
+            notify_on_backup=False,
+        )
+        cfg_mod.save_config(cfg)
+
+        bad_zip_dir = Path(cfg.backups_dir) / "MyTestWorld"
+        bad_zip_dir.mkdir(parents=True, exist_ok=True)
+        bad_zip = bad_zip_dir / "MyTestWorld_bad.zip"
+        with zipfile.ZipFile(bad_zip, "w") as zf:
+            zf.writestr("../escape.txt", "bad")
+
+        res = restore_world_from_drive("MyTestWorld", bad_zip.name, self.world_dir, cfg)
+        self.assertFalse(res.success)
+        self.assertTrue((self.world_dir / "level.dat").is_file())
 
 
 if __name__ == "__main__":

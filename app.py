@@ -16,6 +16,10 @@ from backup_engine import (
     check_rclone_status,
     flush_pending_uploads,
     get_logger,
+    list_remote_backups,
+    list_remote_worlds,
+    restore_world_from_drive,
+    safe_world_slug,
 )
 from config import (
     APP_DIR,
@@ -201,6 +205,7 @@ class BackupManagerGUI:
             command=self.on_save_and_start,
         ).pack(side="left", padx=(0, 8))
         ttk.Button(act_frame, text="Backup Selected Now", command=self.on_backup_now).pack(side="left", padx=6)
+        ttk.Button(act_frame, text="Restore from Drive...", command=self.on_open_restore).pack(side="left", padx=6)
         ttk.Button(act_frame, text="Stop Watcher", command=self.on_stop_watcher).pack(side="left", padx=6)
         ttk.Button(act_frame, text="Open Local Backups", command=self.on_open_backups).pack(
             side="right", padx=(6, 0)
@@ -379,6 +384,15 @@ class BackupManagerGUI:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def on_open_restore(self) -> None:
+        if not self._save_form_settings():
+            return
+        RestoreDialog(self.root, self.cfg, self.worlds, on_restored=self._after_restore)
+
+    def _after_restore(self, msg: str) -> None:
+        self.action_status_var.set(msg)
+        self.refresh_worlds()
+
     def on_open_backups(self) -> None:
         bdir = self.cfg.resolved_backups_dir()
         bdir.mkdir(parents=True, exist_ok=True)
@@ -418,6 +432,214 @@ class BackupManagerGUI:
             except OSError:
                 pass
         self.root.after(2000, self._schedule_log_poll)
+
+
+class RestoreDialog(tk.Toplevel):
+    """One-click Google Drive world restore dialog."""
+
+    def __init__(
+        self,
+        parent: tk.Tk,
+        cfg: BackupConfig,
+        worlds: list[DiscoveredWorld],
+        on_restored,
+    ) -> None:
+        super().__init__(parent)
+        self.title("Restore World from Google Drive")
+        self.geometry("660x470")
+        self.minsize(560, 400)
+        self.transient(parent)
+        self.grab_set()
+
+        self.cfg = cfg
+        self.worlds = worlds
+        self.on_restored = on_restored
+        self.backups: list[str] = []
+
+        self.world_slug_var = tk.StringVar()
+        self.target_dir_var = tk.StringVar()
+        self.status_var = tk.StringVar(value="Loading worlds from Google Drive...")
+
+        self._build_ui()
+        self._load_remote_worlds()
+
+    def _build_ui(self) -> None:
+        pad = {"padx": 12, "pady": 6}
+
+        top = ttk.Frame(self)
+        top.pack(fill="x", **pad)
+        ttk.Label(top, text="Drive World:").pack(side="left")
+        self.world_combo = ttk.Combobox(top, textvariable=self.world_slug_var, state="readonly", width=32)
+        self.world_combo.pack(side="left", padx=(6, 8), fill="x", expand=True)
+        self.world_combo.bind("<<ComboboxSelected>>", lambda _e: self._load_backups_for_selected())
+        self.refresh_btn = ttk.Button(top, text="Refresh", command=self._load_remote_worlds)
+        self.refresh_btn.pack(side="left")
+
+        list_frame = ttk.LabelFrame(self, text="Available Backups in Google Drive (Newest First)")
+        list_frame.pack(fill="both", expand=True, **pad)
+        self.listbox = tk.Listbox(list_frame, font=("Consolas", 10), activestyle="dotbox", exportselection=False)
+        vsb = ttk.Scrollbar(list_frame, orient="vertical", command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=vsb.set)
+        self.listbox.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        vsb.pack(side="right", fill="y", padx=(0, 8), pady=8)
+
+        dst_frame = ttk.LabelFrame(self, text="Restore Destination Folder")
+        dst_frame.pack(fill="x", **pad)
+        dst_row = ttk.Frame(dst_frame)
+        dst_row.pack(fill="x", padx=8, pady=8)
+        ttk.Entry(dst_row, textvariable=self.target_dir_var).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ttk.Button(dst_row, text="Browse...", command=self._browse_target).pack(side="left")
+
+        ttk.Label(self, textvariable=self.status_var).pack(fill="x", padx=14, pady=(2, 4))
+
+        btn_row = ttk.Frame(self)
+        btn_row.pack(fill="x", padx=12, pady=(4, 12))
+        self.restore_btn = ttk.Button(
+            btn_row,
+            text="Restore Selected Backup",
+            command=self._on_restore,
+            state="disabled",
+        )
+        self.restore_btn.pack(side="left")
+        ttk.Button(btn_row, text="Close", command=self.destroy).pack(side="right")
+
+    def _guess_target_for_slug(self, slug: str) -> str:
+        for wp in self.cfg.selected_worlds:
+            if safe_world_slug(wp).lower() == slug.lower():
+                return wp
+        for w in self.worlds:
+            if safe_world_slug(w.path).lower() == slug.lower():
+                return w.path
+        if self.worlds:
+            return str(Path(self.worlds[0].path).parent / slug)
+        return str(Path.home() / "mcBackup_restored" / slug)
+
+    def _browse_target(self) -> None:
+        chosen = filedialog.askdirectory(parent=self, title="Choose Destination World Folder")
+        if chosen:
+            self.target_dir_var.set(str(Path(chosen).resolve()))
+
+    def _set_busy(self, busy: bool) -> None:
+        state = "disabled" if busy else "normal"
+        self.refresh_btn.configure(state=state)
+        self.world_combo.configure(state="disabled" if busy else "readonly")
+        if busy or not self.backups:
+            self.restore_btn.configure(state="disabled")
+        else:
+            self.restore_btn.configure(state="normal")
+
+    def _load_remote_worlds(self) -> None:
+        self._set_busy(True)
+        self.status_var.set("Fetching world list from Google Drive...")
+
+        def worker() -> None:
+            ok, folders, err = list_remote_worlds(self.cfg)
+            self.after(0, lambda: self._on_worlds_loaded(ok, folders, err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_worlds_loaded(self, ok: bool, folders: list[str], err: str) -> None:
+        if not ok:
+            self._set_busy(False)
+            self.status_var.set(f"Error: {err}")
+            return
+        if not folders:
+            self.world_combo["values"] = []
+            self.backups = []
+            self.listbox.delete(0, "end")
+            self._set_busy(False)
+            self.status_var.set("No backups found in Google Drive yet.")
+            return
+
+        self.world_combo["values"] = folders
+        preferred = ""
+        if self.cfg.selected_worlds:
+            pref_slug = safe_world_slug(self.cfg.selected_worlds[0]).lower()
+            for f in folders:
+                if f.lower() == pref_slug:
+                    preferred = f
+                    break
+        self.world_slug_var.set(preferred or folders[0])
+        self._load_backups_for_selected()
+
+    def _load_backups_for_selected(self) -> None:
+        slug = self.world_slug_var.get().strip()
+        if not slug:
+            return
+        self.target_dir_var.set(self._guess_target_for_slug(slug))
+        self._set_busy(True)
+        self.status_var.set(f"Listing backups for '{slug}'...")
+
+        def worker() -> None:
+            ok, zips, err = list_remote_backups(slug, self.cfg)
+            self.after(0, lambda: self._on_backups_loaded(slug, ok, zips, err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_backups_loaded(self, slug: str, ok: bool, zips: list[str], err: str) -> None:
+        self.listbox.delete(0, "end")
+        if not ok:
+            self.backups = []
+            self._set_busy(False)
+            self.status_var.set(f"Error listing '{slug}': {err}")
+            return
+        self.backups = zips
+        for z in zips:
+            self.listbox.insert("end", z)
+        if zips:
+            self.listbox.selection_set(0)
+            self.listbox.activate(0)
+            self.status_var.set(f"Found {len(zips)} backup(s) for '{slug}'. Latest is selected.")
+        else:
+            self.status_var.set(f"No .zip backups found for '{slug}'.")
+        self._set_busy(False)
+
+    def _on_restore(self) -> None:
+        sel = self.listbox.curselection()
+        if not sel:
+            messagebox.showwarning("No Backup Selected", "Please choose a backup from the list.", parent=self)
+            return
+        slug = self.world_slug_var.get().strip()
+        zip_name = self.backups[sel[0]]
+        target = self.target_dir_var.get().strip()
+        if not target:
+            messagebox.showwarning("No Destination", "Please enter a destination folder.", parent=self)
+            return
+
+        confirmed = messagebox.askyesno(
+            "Confirm World Restore",
+            f"Restore backup:\n  {zip_name}\n\nInto folder:\n  {target}\n\n"
+            "If this folder already exists, a safety snapshot will be saved before replacing it. Continue?",
+            parent=self,
+        )
+        if not confirmed:
+            return
+
+        self._set_busy(True)
+        self.status_var.set(f"Restoring {zip_name}...")
+
+        def worker() -> None:
+            res = restore_world_from_drive(
+                slug,
+                zip_name,
+                target,
+                self.cfg,
+                progress_cb=lambda m: self.after(0, lambda msg=m: self.status_var.set(msg)),
+            )
+            self.after(0, lambda: self._after_restore_done(res))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_restore_done(self, res) -> None:
+        self._set_busy(False)
+        self.status_var.set(res.message)
+        if res.success:
+            self.on_restored(res.message)
+            extra = f"\n\nPre-restore safety zip:\n{res.safety_zip_path}" if res.safety_zip_path else ""
+            messagebox.showinfo("Restore Complete", f"{res.message}{extra}", parent=self)
+            self.destroy()
+        else:
+            messagebox.showerror("Restore Failed", res.message, parent=self)
 
 
 def run_cli(args: argparse.Namespace) -> int:
@@ -497,6 +719,38 @@ def run_cli(args: argparse.Namespace) -> int:
         print(f"Stopped {n} watcher process(es).")
         return 0
 
+    if args.list_remote is not None:
+        if args.list_remote == "__ALL__":
+            ok, folders, err = list_remote_worlds(cfg)
+            if not ok:
+                print(f"Error: {err}", file=sys.stderr)
+                return 1
+            for f in folders:
+                print(f)
+            return 0
+        ok, zips, err = list_remote_backups(args.list_remote, cfg)
+        if not ok:
+            print(f"Error: {err}", file=sys.stderr)
+            return 1
+        for z in zips:
+            print(z)
+        return 0
+
+    if args.restore:
+        if not args.target:
+            print("Error: --restore requires --target <world_folder>", file=sys.stderr)
+            return 1
+        zip_name = args.zip
+        if not zip_name:
+            ok, zips, err = list_remote_backups(args.restore, cfg)
+            if not ok or not zips:
+                print(f"Error finding backups for '{args.restore}': {err or 'none found'}", file=sys.stderr)
+                return 1
+            zip_name = zips[0]
+        res = restore_world_from_drive(args.restore, zip_name, args.target, cfg, progress_cb=print)
+        print(res.message)
+        return 0 if res.success else 1
+
     # Default: launch GUI
     root = tk.Tk()
     BackupManagerGUI(root)
@@ -517,6 +771,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stop-watcher", action="store_true", help="Stop background watcher")
     p.add_argument("--install-startup", action="store_true", help="Enable watcher auto-start on Windows logon")
     p.add_argument("--uninstall-startup", action="store_true", help="Remove watcher auto-start")
+    p.add_argument(
+        "--list-remote",
+        nargs="?",
+        const="__ALL__",
+        default=None,
+        metavar="WORLD_SLUG",
+        help="List worlds or backup zips in Google Drive",
+    )
+    p.add_argument("--restore", metavar="WORLD_SLUG", help="Restore a world from Google Drive")
+    p.add_argument("--zip", metavar="ZIP_NAME", help="Specific backup zip filename to restore (defaults to latest)")
+    p.add_argument("--target", metavar="PATH", help="Destination folder path for --restore")
     return p.parse_args()
 
 

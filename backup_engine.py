@@ -434,3 +434,239 @@ def backup_world(
         send_windows_notification(title, f"{wpath.name} ({size_mb:.1f} MB) — {upload_msg}")
 
     return BackupResult(str(wpath), str(zip_path), uploaded, summary)
+
+
+@dataclass
+class RestoreResult:
+    success: bool
+    target_path: str
+    safety_zip_path: str
+    message: str
+
+
+def list_remote_worlds(cfg: BackupConfig | None = None) -> tuple[bool, list[str], str]:
+    """List world folder slugs present under the configured Google Drive backup folder."""
+    cfg = cfg or load_config()
+    rclone = find_rclone(cfg.rclone_path)
+    if not rclone:
+        return False, [], "rclone not found"
+
+    remote_root = f"{cfg.rclone_remote}:{cfg.gdrive_folder.strip('/')}"
+    try:
+        res = subprocess.run(
+            [rclone, "lsf", "--dirs-only", remote_root],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            **_popen_kwargs(),
+        )
+        if res.returncode != 0:
+            err = (res.stderr or res.stdout).strip() or f"exit code {res.returncode}"
+            return False, [], err
+        folders = sorted(
+            line.strip().rstrip("/")
+            for line in res.stdout.splitlines()
+            if line.strip()
+        )
+        return True, folders, ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, [], str(exc)
+
+
+def list_remote_backups(
+    world_slug: str,
+    cfg: BackupConfig | None = None,
+) -> tuple[bool, list[str], str]:
+    """List backup .zip filenames in Google Drive for a world slug (newest first)."""
+    cfg = cfg or load_config()
+    rclone = find_rclone(cfg.rclone_path)
+    if not rclone:
+        return False, [], "rclone not found"
+
+    remote_dir = f"{cfg.rclone_remote}:{cfg.gdrive_folder.strip('/')}/{world_slug}"
+    try:
+        res = subprocess.run(
+            [rclone, "lsf", "--files-only", remote_dir],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            **_popen_kwargs(),
+        )
+        if res.returncode != 0:
+            err = (res.stderr or res.stdout).strip() or f"exit code {res.returncode}"
+            return False, [], err
+        zips = sorted(
+            (
+                line.strip()
+                for line in res.stdout.splitlines()
+                if line.strip().lower().endswith(".zip")
+            ),
+            reverse=True,
+        )
+        return True, zips, ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, [], str(exc)
+
+
+def _download_zip_from_drive(
+    rclone: str,
+    remote_name: str,
+    remote_folder: str,
+    world_slug: str,
+    zip_name: str,
+    dest_zip: Path,
+    logger: logging.Logger,
+) -> tuple[bool, str]:
+    remote_src = f"{remote_name}:{remote_folder.strip('/')}/{world_slug}/{zip_name}"
+    dest_zip.parent.mkdir(parents=True, exist_ok=True)
+    tmp_zip = dest_zip.with_suffix(".zip.dl_tmp")
+    if tmp_zip.exists():
+        tmp_zip.unlink()
+
+    try:
+        res = subprocess.run(
+            [
+                rclone,
+                "copyto",
+                remote_src,
+                str(tmp_zip),
+                "--retries",
+                "3",
+                "--low-level-retries",
+                "10",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            **_popen_kwargs(),
+        )
+        if res.returncode == 0 and tmp_zip.is_file():
+            os.replace(tmp_zip, dest_zip)
+            logger.info("Downloaded from Google Drive: %s", remote_src)
+            return True, str(dest_zip)
+        tmp_zip.unlink(missing_ok=True)
+        err = (res.stderr or res.stdout).strip() or f"exit code {res.returncode}"
+        return False, err
+    except (OSError, subprocess.SubprocessError) as exc:
+        tmp_zip.unlink(missing_ok=True)
+        return False, str(exc)
+
+
+def _safe_extract_zip(zip_path: Path, staging_dir: Path) -> None:
+    staging_root = staging_dir.resolve()
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for member in zf.infolist():
+            dest_path = (staging_root / member.filename).resolve()
+            if dest_path != staging_root and staging_root not in dest_path.parents:
+                raise ValueError(f"Unsafe zip member path: {member.filename}")
+        zf.extractall(staging_root)
+
+
+def restore_world_from_drive(
+    world_slug: str,
+    zip_name: str,
+    target_world_dir: str | Path,
+    cfg: BackupConfig | None = None,
+    *,
+    progress_cb: Callable[[str], None] | None = None,
+) -> RestoreResult:
+    """Download a backup zip from Google Drive and atomically restore it to target_world_dir."""
+    cfg = cfg or load_config()
+    logger = get_logger()
+    target = Path(target_world_dir).resolve()
+
+    if target.exists() and is_world_locked(target):
+        msg = f"Cannot restore while '{target.name}' is open in Minecraft. Please Save & Quit first."
+        logger.warning(msg)
+        return RestoreResult(False, str(target), "", msg)
+
+    local_zip = cfg.resolved_backups_dir() / world_slug / zip_name
+    if not local_zip.is_file() or local_zip.stat().st_size == 0:
+        rclone = find_rclone(cfg.rclone_path)
+        if not rclone:
+            return RestoreResult(False, str(target), "", "rclone not found; cannot download backup.")
+        if progress_cb:
+            progress_cb(f"Downloading {zip_name} from Google Drive...")
+        ok, detail = _download_zip_from_drive(
+            rclone,
+            cfg.rclone_remote,
+            cfg.gdrive_folder,
+            world_slug,
+            zip_name,
+            local_zip,
+            logger,
+        )
+        if not ok:
+            msg = f"Failed to download {zip_name}: {detail}"
+            logger.error(msg)
+            return RestoreResult(False, str(target), "", msg)
+    else:
+        if progress_cb:
+            progress_cb(f"Using cached {zip_name}...")
+
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = target.parent / f".mcbackup_restore_{stamp}"
+    old_backup_dir = target.parent / f".mcbackup_old_{stamp}"
+
+    if progress_cb:
+        progress_cb(f"Extracting and verifying {zip_name}...")
+    try:
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        _safe_extract_zip(local_zip, staging_dir)
+        if not (staging_dir / "level.dat").is_file() and not (staging_dir / "levelname.txt").is_file():
+            raise ValueError("Archive does not contain level.dat or levelname.txt at root.")
+    except Exception as exc:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        msg = f"Invalid backup archive '{zip_name}': {exc}"
+        logger.error(msg)
+        return RestoreResult(False, str(target), "", msg)
+
+    safety_zip_path = ""
+    if target.exists():
+        if progress_cb:
+            progress_cb("Creating safety snapshot of current world...")
+        safety_zip = cfg.resolved_backups_dir() / "_pre_restore" / f"{world_slug}_pre_restore_{stamp}.zip"
+        try:
+            _create_world_zip(target, safety_zip, logger)
+            safety_zip_path = str(safety_zip)
+        except Exception as exc:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            msg = f"Failed to create pre-restore safety snapshot: {exc}"
+            logger.error(msg)
+            return RestoreResult(False, str(target), "", msg)
+
+    if progress_cb:
+        progress_cb(f"Applying restore to {target.name}...")
+    try:
+        if target.exists():
+            os.replace(target, old_backup_dir)
+        os.replace(staging_dir, target)
+        if old_backup_dir.exists():
+            shutil.rmtree(old_backup_dir, ignore_errors=True)
+    except Exception as exc:
+        if not target.exists() and old_backup_dir.exists():
+            try:
+                os.replace(old_backup_dir, target)
+            except OSError:
+                pass
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        msg = f"Restore swap failed: {exc}"
+        logger.exception(msg)
+        return RestoreResult(False, str(target), safety_zip_path, msg)
+
+    # Record restored fingerprint so watcher doesn't immediately re-zip identical files
+    state = load_state()
+    state.setdefault("worlds", {})[str(target).lower()] = {
+        "last_fingerprint": compute_world_fingerprint(target),
+        "last_backup_at": datetime.now().isoformat(timespec="seconds"),
+        "last_zip": str(local_zip),
+        "last_reason": "restored_from_drive",
+    }
+    save_state(state)
+
+    summary = f"Restored '{target.name}' from {zip_name}"
+    logger.info("%s (safety snapshot: %s)", summary, safety_zip_path or "none")
+    if cfg.notify_on_backup:
+        send_windows_notification("Minecraft World Restored", summary)
+    return RestoreResult(True, str(target), safety_zip_path, summary)

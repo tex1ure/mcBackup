@@ -135,6 +135,8 @@ python app.py --connect-gdrive    # Run 1-time Google Drive OAuth sign-in
 python app.py --backup-now        # Force an immediate backup + upload
 python app.py --install-startup   # Enable auto-start on login
 python app.py --start-watcher     # Start background watcher
+python app.py --list-remote       # List backed-up worlds in Google Drive
+python app.py --restore World --target "<path>"  # Restore latest Drive backup
 python app.py --status            # Print Drive, watcher, and queue status
 ```
 
@@ -157,7 +159,7 @@ python app.py --status            # Print Drive, watcher, and queue status
 - [x] Windows single-file `.exe` installer (`mcBackup-Setup.exe`)
 - [x] macOS & Linux cross-platform support and installers
 - [x] Automatic offline upload retry queue & OS shutdown protection
-- [ ] One-click world restore from Google Drive inside the GUI
+- [x] One-click world restore from Google Drive inside the GUI
 
 See the [open issues](https://github.com/tex1ure/mcBackup/issues) for a full list of proposed features and known issues.
 
