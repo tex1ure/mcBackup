@@ -1,32 +1,33 @@
 <a id="readme-top"></a>
 
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
-[![Release][release-shield]][release-url]
-
-<br />
-<div align="center">
+<p align="center">
   <a href="https://github.com/tex1ure/mcBackup">
-    <img src="assets/logo.png" alt="mcBackup Logo" width="220" height="220">
+    <img src="assets/logo.png" alt="mcBackup Logo" width="180" height="180">
   </a>
+</p>
 
-  <h3 align="center">mcBackup</h3>
+<h1 align="center">mcBackup</h1>
 
-  <p align="center">
-    Automatic Minecraft world backups to Google Drive after every single Save &amp; Quit, exit, or PC shutdown.
-    <br />
-    <a href="https://github.com/tex1ure/mcBackup/releases"><strong>Download Latest Release »</strong></a>
-    <br />
-    <br />
-    <a href="#getting-started">Getting Started</a>
-    ·
-    <a href="https://github.com/tex1ure/mcBackup/issues/new?labels=bug">Report Bug</a>
-    ·
-    <a href="https://github.com/tex1ure/mcBackup/issues/new?labels=enhancement">Request Feature</a>
-  </p>
-</div>
+<p align="center">
+  Automatic Minecraft world backups to Google Drive after every single Save &amp; Quit, exit, or PC shutdown.
+</p>
+
+<p align="center">
+  <a href="https://github.com/tex1ure/mcBackup/releases"><img src="https://img.shields.io/github/v/release/tex1ure/mcBackup?style=for-the-badge&color=00d4ff" alt="Release"></a>
+  <a href="https://github.com/tex1ure/mcBackup/stargazers"><img src="https://img.shields.io/github/stars/tex1ure/mcBackup?style=for-the-badge" alt="Stars"></a>
+  <a href="https://github.com/tex1ure/mcBackup/issues"><img src="https://img.shields.io/github/issues/tex1ure/mcBackup?style=for-the-badge" alt="Issues"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="MIT License"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/tex1ure/mcBackup/releases"><strong>Download Latest Release »</strong></a>
+  ·
+  <a href="#getting-started">Getting Started</a>
+  ·
+  <a href="https://github.com/tex1ure/mcBackup/issues/new?labels=bug">Report Bug</a>
+  ·
+  <a href="https://github.com/tex1ure/mcBackup/issues/new?labels=enhancement">Request Feature</a>
+</p>
 
 <details>
   <summary>Table of Contents</summary>
